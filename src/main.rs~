@@ -1,0 +1,106 @@
+use clap::Parser;
+use colored::*;
+use infer;
+use rayon::prelude::*;
+use std::path::{Path, PathBuf};
+use walkdir::WalkDir;
+
+/// Tool deteksi tipe file cepat berbasis Rust
+#[derive(Parser, Debug)]
+#[command(author, version, about, long_about = None)]
+struct Args {
+    /// Path folder atau file yang ingin dicek
+    #[arg(default_value = ".")]
+    path: String,
+
+    /// Scan secara rekursif ke dalam subfolder
+    #[arg(short, long)]
+    recursive: bool,
+}
+
+fn main() {
+    let args = Args::parse();
+    let root_path = Path::new(&args.path);
+
+    if !root_path.exists() {
+        eprintln!("{}: Path tidak ditemukan!", "Error".red().bold());
+        return;
+    }
+
+    // 1. Kumpulkan semua path file terlebih dahulu
+    let mut files: Vec<PathBuf> = Vec::new();
+
+    let walker = WalkDir::new(root_path)
+        .max_depth(if args.recursive { usize::MAX } else { 1 });
+
+    for entry in walker.into_iter().filter_map(|e| e.ok()) {
+        if entry.file_type().is_file() {
+            files.push(entry.path().to_path_buf());
+        }
+    }
+
+    println!(
+        "{} Memproses {} file...\n",
+        "INFO:".blue().bold(),
+        files.len().to_string().yellow()
+    );
+
+    // 2. Proses deteksi secara PARALEL menggunakan Rayon
+    files.par_iter().for_each(|file_path| {
+        detect_and_print(file_path);
+    });
+}
+
+fn detect_and_print(path: &Path) {
+    let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("Unknown");
+    
+    // Kita hanya baca header file (magic bytes), bukan seluruh isi file
+    // Ini sangat efisien untuk memori
+    match infer::get_from_path(path) {
+        Ok(Some(info)) => {
+            let category = determine_color(info.mime_type());
+            println!(
+                "{:<30} | {:<10} | {}",
+                file_name.truncate_ext(28).white(),
+                info.extension().uppercase().bold().color(category),
+                info.mime_type().italic().dimmed()
+            );
+        }
+        Ok(None) => {
+            // Jika tidak ketemu magic number, biasanya ini plain text atau data mentah
+            println!(
+                "{:<30} | {:<10} | {}",
+                file_name.truncate_ext(28).white(),
+                "TEXT/DATA".blue(),
+                "unknown/plain-text".dimmed()
+            );
+        }
+        Err(_) => {
+            eprintln!("{}: Gagal akses {:?}", "SKIP".red(), file_name);
+        }
+    }
+}
+
+// Helper untuk mewarnai output berdasarkan tipe file
+fn determine_color(mime: &str) -> Color {
+    if mime.starts_with("image/") { Color::Green }
+    else if mime.starts_with("video/") { Color::Magenta }
+    else if mime.starts_with("application/x-executable") || mime.contains("elf") { Color::Red }
+    else if mime.contains("zip") || mime.contains("compressed") { Color::Yellow }
+    else { Color::Cyan }
+}
+
+// Helper untuk merapikan tampilan nama file yang kepanjangan
+trait Truncate {
+    fn truncate_ext(&self, max: usize) -> String;
+}
+
+impl Truncate for str {
+    fn truncate_ext(&self, max: usize) -> String {
+        if self.len() > max {
+            format!("{}..", &self[0..max - 2])
+        } else {
+            self.to_string()
+        }
+    }
+}
